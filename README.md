@@ -30,7 +30,7 @@ The code does not intentionally read file contents, change NAS settings, or writ
 
 ## Setup
 
-The image is built from the `Dockerfile` in this repo, which copies `diskwatch.py` into a `python:3.12-slim` image. The Compose file stores reports at `/volume2/docker/diskwatch/data` on the NAS. **Create that directory yourself and verify `/volume2` is the SSD mount before deploying.** Also check that the UGOS Docker app's image/container storage and the Project folder are on `/volume2`; otherwise Docker itself may access the HDD pool. The Compose bind mount is configured to fail if the directory is absent, preventing Docker from silently creating it on the wrong filesystem. If your NAS Compose implementation rejects `create_host_path`, update it rather than removing that safeguard.
+The image is built from the `Dockerfile` in this repo, which copies `diskwatch.py` into a `python:3.12-slim` image. `docker-compose.yml` points the build at this GitHub repository, so Docker fetches the code itself, and the compose file can be used on its own. The NAS needs internet access when you deploy, and every deploy rebuilds from the latest `main`. The Compose file stores reports at `/volume2/docker/diskwatch/data` on the NAS. **Create that directory yourself and verify `/volume2` is the SSD mount before deploying.** Also check that the UGOS Docker app's image/container storage and the Project folder are on `/volume2`; otherwise Docker itself may access the HDD pool. The Compose bind mount is configured to fail if the directory is absent, preventing Docker from silently creating it on the wrong filesystem. If your NAS Compose implementation rejects `create_host_path`, update it rather than removing that safeguard.
 
 If your volumes are laid out differently, change the `/volume2/docker/diskwatch/data` path and `WATCH_VOLUME` in `docker-compose.yml`.
 
@@ -40,26 +40,26 @@ Choose a password of at least 12 characters for `DISKWATCH_PASSWORD`. Don't put 
 
 ### With Portainer (recommended)
 
-Portainer builds and runs the stack straight from this repository, so nothing needs to be uploaded to the NAS.
+Nothing needs to be uploaded to the NAS. You only paste the compose file and add two variables.
 
 1. In Portainer, go to **Stacks → Add stack**.
 2. **Name:** `diskwatch`
-3. **Build method:** **Repository**.
-   - Repository URL: `https://github.com/capturo/diskwatch`
-   - Repository reference: `refs/heads/main`
-   - Compose path: `docker-compose.yml`
-   - If the repository is private, turn on **Authentication** and enter your GitHub username and a personal access token with read access to the repo.
+3. **Build method:** **Web editor**. Paste in the contents of [`docker-compose.yml`](docker-compose.yml) unchanged.
 4. Under **Environment variables**, add:
    - `DISKWATCH_PASSWORD`: your password
    - `DISKWATCH_BIND_IP`: the NAS LAN address
-5. Click **Deploy the stack**. The first deploy downloads the Python base image and builds the image. Repository deployment uses the version pushed to GitHub; local edits here are not included until you push them.
+5. Click **Deploy the stack**. The first deploy downloads the Python base image and builds the image.
 
-To update after new commits, open the stack, click **Pull and redeploy**, and turn on the option to re-pull the image. If the page still shows the old version, delete the `diskwatch:local` image under **Images** and redeploy.
+To update after new commits, open the stack and click **Update the stack**. The build step fetches the latest `main` again.
+
+The **Repository** build method also works, with URL `https://github.com/capturo/diskwatch`, reference `refs/heads/main` and compose path `docker-compose.yml`. Add the same two environment variables.
+
+If a deploy fails with a build or git error, your Docker version may not support building from a Git URL. In that case, change `build:` to `build: .` in `docker-compose.yml` on a branch or fork, and deploy that with the Repository method. Repository mode clones the repo first, so `.` works there.
 
 ### With the UGOS Docker app
 
 1. In UGOS **File Manager**, open the **docker** shared folder on `/volume2` and create `diskwatch/data`.
-2. Upload `diskwatch.py`, `Dockerfile` and `docker-compose.yml` into it. Also create a file named `.env` there, containing:
+2. Upload `docker-compose.yml` into `diskwatch`. Also create a file named `.env` there, containing:
    ```
    DISKWATCH_PASSWORD=<your password>
    DISKWATCH_BIND_IP=<NAS LAN address>

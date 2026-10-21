@@ -3,7 +3,9 @@
 # Set DISKWATCH_PASSWORD and DISKWATCH_BIND_IP as stack environment variables (not in this file).
 services:
   diskwatch:
-    build: .                  # the image is built from the Dockerfile in this repo
+    # Built from the Dockerfile on GitHub, so this file can be pasted into Portainer's Web editor.
+    build: https://github.com/capturo/diskwatch.git#main
+    pull_policy: build        # rebuild from the latest main on every deploy
     image: diskwatch:local
     container_name: diskwatch
     restart: unless-stopped
