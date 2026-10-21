@@ -11,29 +11,32 @@ It was written for a UGREEN NAS running UGOS Pro, with the HDDs on `/volume1` an
 
 ## How it works
 
-- The kernel's fanotify feature reports every file and folder opened on the HDD volume, with the process and Docker container that opened it.
-- `/proc/diskstats` is read once a second to see when the HDDs are active and how much they read and write. Reading it never spins the drives up.
+- The kernel's fanotify feature reports file activity on the HDD volume and the process responsible. Docker processes are shown with a container ID prefix by default.
+- `/proc/diskstats` is read once a second to see when rotational disks are active and how much they read and write. These counter reads do not access disk contents.
 - `/proc/<pid>/io` gives each process's read and write totals during a burst.
 - Reports are kept on the web page and appended to `data/wakes.jsonl` and `data/bursts.jsonl`.
 
-### Is it safe?
+### Safety and limitations
 
-- It never reads or writes your files. It only reads system information from `/proc` and `/sys`. The only thing it writes is its own report files, in the data folder on the SSD.
-- fanotify runs in notify-only mode, so diskwatch can't block or delay any file access.
-- It doesn't wake the drives, and it doesn't keep `/volume1` busy, so it won't stop the pool from unmounting or the NAS from shutting down.
-- If it crashes, monitoring stops and nothing else is affected.
+The code does not intentionally read file contents, change NAS settings, or write to the watched volume. It reads kernel and process information, receives file-event descriptors, and writes reports under `/data`. The supplied container has a read-only root filesystem; **make sure `/data` is on an SSD or another always-on filesystem** before starting it. Creating the watch may touch volume metadata during setup, so do not promise that installing it will never wake a sleeping pool.
 
-Things to be aware of:
-
-- The container runs **privileged** and shares the host's process list. It needs that to watch files and see other processes. It also mounts the Docker socket read-only, but only to look up container names.
-- The web page has **no password**. Anyone on your network can see file and folder names on the HDD volume. Stop it once you've found what you were looking for.
-- With `TRACE_READS=1`, every read on the volume becomes an event. During a large copy or a 4K stream, that can use a noticeable share of one CPU core.
+- The fanotify watch uses notification events, not permission events. It cannot approve or deny a file operation, but processing events consumes CPU and kernel resources. With `TRACE_READS=1`, a busy copy or stream can produce many events and some may be dropped; start with the Compose default of `0`.
+- The container is **privileged** and shares the host PID namespace. Docker says a privileged container can take control of its host. Run only code you trust, keep the NAS and Docker updated, and stop the stack after collecting enough evidence. The read-only root filesystem and `no-new-privileges` limit accidental damage by this script but do not contain a compromised privileged process.
+- The Docker socket is **not mounted** by default. Mounting it read-only does not make Docker API access read-only: a process can still send write requests to the daemon. Without it, container IDs appear instead of friendly names.
+- The web page and JSON API require a **password** (`DISKWATCH_PASSWORD`). After 5 wrong attempts, a client is locked out for 15 minutes. Sessions last 12 hours and end when the container restarts. The Compose file publishes port 8099 only on the NAS LAN address. Reports include paths and process command lines, which can contain sensitive information.
+- The page is served over **plain HTTP**. The password and session cookie are not encrypted, so anyone who can capture traffic on your network could read them. Use a password you don't use anywhere else, only open the page from trusted networks, and **never forward the port to the internet**. For HTTPS, put it behind a reverse proxy that you already trust.
+- Report files grow without automatic rotation. Check free space on the report volume, especially if you leave the stack running for days. If monitoring crashes, the script stops observing or retries; there is no mechanism in this code to alter stored files. A busy or failing NAS can still experience monitoring overhead.
+- A wakeup means disk activity after `QUIET_SECONDS` of no observed I/O, **not proof that the drives had spun down**. A listed process is a lead, not proof of causation; metadata access, existing open files, filesystem tasks, and activity on other rotational `sd*` disks can be missed or misattributed.
 
 ## Setup
 
-The image is built from the `Dockerfile` in this repo, which copies `diskwatch.py` into a `python:3.12-slim` image. Reports are saved to `/volume2/docker/diskwatch/data` on the NAS, which Docker creates on first start. That folder has to be on the SSD volume, so the monitor never touches the HDDs.
+The image is built from the `Dockerfile` in this repo, which copies `diskwatch.py` into a `python:3.12-slim` image. The Compose file stores reports at `/volume2/docker/diskwatch/data` on the NAS. **Create that directory yourself and verify `/volume2` is the SSD mount before deploying.** Also check that the UGOS Docker app's image/container storage and the Project folder are on `/volume2`; otherwise Docker itself may access the HDD pool. The Compose bind mount is configured to fail if the directory is absent, preventing Docker from silently creating it on the wrong filesystem. If your NAS Compose implementation rejects `create_host_path`, update it rather than removing that safeguard.
 
 If your volumes are laid out differently, change the `/volume2/docker/diskwatch/data` path and `WATCH_VOLUME` in `docker-compose.yml`.
+
+The web page listens only on the address in `DISKWATCH_BIND_IP`. Set it to the NAS's LAN address. Deploying fails with an error if it isn't set. If the NAS gets its address from DHCP, **reserve that address for the NAS in your router**. If the NAS's address changes, the container fails to start, because Docker can't listen on an address the NAS no longer has.
+
+Choose a password of at least 12 characters for `DISKWATCH_PASSWORD`. Don't put it in `docker-compose.yml`, which is in Git. Set it in Portainer or in a `.env` file as described below. If it isn't set, diskwatch generates a random password at each start and prints it in the container log.
 
 ### With Portainer (recommended)
 
@@ -46,14 +49,22 @@ Portainer builds and runs the stack straight from this repository, so nothing ne
    - Repository reference: `refs/heads/main`
    - Compose path: `docker-compose.yml`
    - If the repository is private, turn on **Authentication** and enter your GitHub username and a personal access token with read access to the repo.
-4. Click **Deploy the stack**. The first deploy downloads `python:3.12-slim` (about 50 MB) and builds the image.
+4. Under **Environment variables**, add:
+   - `DISKWATCH_PASSWORD`: your password
+   - `DISKWATCH_BIND_IP`: the NAS LAN address
+5. Click **Deploy the stack**. The first deploy downloads the Python base image and builds the image. Repository deployment uses the version pushed to GitHub; local edits here are not included until you push them.
 
 To update after new commits, open the stack, click **Pull and redeploy**, and turn on the option to re-pull the image. If the page still shows the old version, delete the `diskwatch:local` image under **Images** and redeploy.
 
 ### With the UGOS Docker app
 
-1. In UGOS **File Manager**, open the **docker** shared folder on `/volume2` and create a folder named `diskwatch`.
-2. Upload `diskwatch.py`, `Dockerfile` and `docker-compose.yml` into it.
+1. In UGOS **File Manager**, open the **docker** shared folder on `/volume2` and create `diskwatch/data`.
+2. Upload `diskwatch.py`, `Dockerfile` and `docker-compose.yml` into it. Also create a file named `.env` there, containing:
+   ```
+   DISKWATCH_PASSWORD=<your password>
+   DISKWATCH_BIND_IP=<NAS LAN address>
+   ```
+   If the UGOS Docker app ignores `.env`, deploying fails with "Set DISKWATCH_BIND_IP to the NAS LAN IP". In that case, use Portainer, or replace `${DISKWATCH_BIND_IP:?...}` in your uploaded copy of `docker-compose.yml` with the address.
 3. In the **Docker** app, go to **Project → Create**.
    - Name: `diskwatch`
    - Path: `docker/diskwatch`
@@ -66,7 +77,7 @@ To update after new commits, open the stack, click **Pull and redeploy**, and tu
   ```
   diskwatch: watching /volume1, HDDs ['sda', 'sdb', 'sdc', 'sdd'], web on :8099
   ```
-- Open `http://<NAS-IP>:8099` in a browser, using the same IP as the UGOS web interface.
+- On your laptop, open `http://<DISKWATCH_BIND_IP>:8099` and sign in with `DISKWATCH_PASSWORD`.
 - **HDDs** should list your hard drives.
 - **Watch mode** should say `whole filesystem` or `per-mount ...`.
 - **File events seen** should go up when you open a folder on `/volume1`.
@@ -78,7 +89,7 @@ If the page shows a red error box, the message says what went wrong. "waiting: /
 The page refreshes every 30 seconds. Let it run for a few days, at least until the drives have slept and woken again.
 
 **Wakeups.** Times are relative to the moment the drives became active.
-- Entries with negative times (for example `-12.0s`) touched the volume before the drives woke. The earliest one is usually the cause.
+- Entries with negative times (for example `-12.0s`) touched the volume before the drives became active. Investigate the earliest entries first, but they may not be the cause.
 - Entries at about `+5` to `+15 s` are often the request that had to wait for the drives to spin up.
 - If a wakeup shows no file activity, the cause was probably a metadata-only access (a folder listing that was no longer cached), a process with files already open, or RAID or filesystem housekeeping.
 
@@ -89,23 +100,26 @@ The page refreshes every 30 seconds. Let it run for a few days, at least until t
 - A long burst is split into one report per hour.
 
 **Recognising the culprit:**
-- A Docker container (Immich, Jellyfin, ...) shows up as `container: <name>`, with paths as they look inside that container.
+- A Docker container (Immich, Jellyfin, ...) shows up as `container: <ID prefix>`, with paths as they look inside that container. Match the ID in Portainer or the Docker app.
 - A computer on the network using a shared folder shows up as `smbd`, with the file path.
 - The NAS's own apps show up by their service name, for example `com.ugreen...`.
 - The antivirus and search indexer often appear right after another process writes a file. They're reacting to that write, not causing it.
 
-Raw reports are in `docker/diskwatch/data/wakes.jsonl` and `bursts.jsonl`. They're also available as JSON from `http://<NAS-IP>:8099/api/`.
+Raw reports are in `docker/diskwatch/data/wakes.jsonl` and `bursts.jsonl`. They're also available as JSON at `/api/` on the same address as the web page.
 
 ## Configuration
 
-These are set as environment variables in `docker-compose.yml`. Restart the project after changing them.
+`DISKWATCH_PASSWORD` and `DISKWATCH_BIND_IP` are set as stack environment variables in Portainer, or in `.env`. The others are set in `docker-compose.yml`. Redeploy after changing them.
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `DISKWATCH_PASSWORD` | random, printed to the log | Password for the web page and API. Set it in Portainer or `.env`, not in the compose file. |
+| `DISKWATCH_BIND_IP` | none, required | NAS LAN address the web page listens on. Used by the compose port mapping. |
+| `SESSION_HOURS` | `12` | How long a sign-in lasts |
 | `WATCH_VOLUME` | `/volume1` | The HDD volume to watch |
-| `QUIET_SECONDS` | `300` | HDD silence that counts as asleep before a wakeup |
+| `QUIET_SECONDS` | `300` | No observed HDD I/O required before an activity report |
 | `WINDOW_BEFORE` / `WINDOW_AFTER` | `60` / `30` | Seconds of file activity to include before and after a wakeup |
-| `TRACE_READS` | `0` (set to `1` in the compose file) | `1` also records reads and writes on files that were already open |
+| `TRACE_READS` | `0` | `1` also records reads and writes on files that were already open, at a higher overhead |
 | `BURST_MB_S` | `20` | Combined HDD read+write rate that counts as heavy I/O |
 | `BURST_AVG_SECONDS` | `60` | Window the rate is averaged over |
 | `BURST_MIN_SECONDS` | `120` | Shortest burst that gets reported |

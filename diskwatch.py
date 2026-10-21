@@ -10,21 +10,26 @@ second. It records two kinds of reports:
   * bursts: sustained heavy HDD I/O, with the processes that did the most I/O
     and the files/folders they used on the volume.
 
-Results are served on a small web page and appended to DATA_DIR/*.jsonl.
-The monitor never reads from or writes to the watched volume itself: it only
-reads procfs/sysfs and writes to DATA_DIR (which must live on the SSD).
+Results are served on a small password-protected web page and appended to
+DATA_DIR/*.jsonl. The monitor never reads from or writes to the watched volume
+itself: it only reads procfs/sysfs and writes to DATA_DIR (which must live on
+the SSD).
 """
 import ctypes
+import hmac
 import http.client
+import http.cookies
 import http.server
 import html
 import json
 import os
 import re
+import secrets
 import socket
 import struct
 import threading
 import time
+import urllib.parse
 from collections import Counter, deque
 
 VOLUME = os.environ.get("WATCH_VOLUME", "/volume1")
@@ -38,9 +43,14 @@ BURST_CHUNK_SECONDS = int(os.environ.get("BURST_CHUNK_SECONDS", "3600"))
 PORT = int(os.environ.get("PORT", "8099"))
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TRACE_READS = os.environ.get("TRACE_READS", "0") == "1"
+PASSWORD = os.environ.get("DISKWATCH_PASSWORD", "")
+SESSION_HOURS = float(os.environ.get("SESSION_HOURS", "12"))
 DOCKER_SOCK = "/var/run/docker.sock"
 HOST_ROOT = "/proc/1/root"
 RETRY_SECONDS = 30
+SESSION_COOKIE = "diskwatch_session"
+MAX_LOGIN_FAILURES = 5            # per client, before a lockout
+LOCKOUT_SECONDS = 15 * 60
 
 FAN_CLOEXEC = 0x00000001
 FAN_CLASS_NOTIF = 0x00000000
@@ -375,7 +385,11 @@ def file_watch_loop():
 
 def find_hdds():
     hdds = []
-    for dev in sorted(os.listdir("/sys/block")):
+    try:
+        devices = sorted(os.listdir("/sys/block"))
+    except OSError:
+        return hdds
+    for dev in devices:
         if not dev.startswith("sd"):
             continue
         try:
@@ -569,6 +583,41 @@ def fmt_mb(mb):
     return f"{mb / 1024:.1f} GB" if mb >= 1024 else f"{int(mb)} MB"
 
 
+STYLE = """
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--muted:#677084;--line:#e3e6ec;--accent:#2f6fde;--warn:#b5651d}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--fg:#e4e7ec;--muted:#959cab;--line:#2c313a;--accent:#6ea0ff;--warn:#e0a060}}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
+main{max-width:1100px;margin:0 auto;padding:20px 16px}
+h1{font-size:20px;margin:0 0 4px} h2{font-size:16px;margin:28px 0 10px}
+.muted{color:var(--muted)} .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+.stats{display:flex;flex-wrap:wrap;gap:8px 24px} .stats b{display:block;font-size:16px}
+table{width:100%;border-collapse:collapse;font-size:13px} th,td{text-align:left;padding:6px 8px;border-top:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:500;border-top:none} code{font-size:12px;word-break:break-all}
+.t{white-space:nowrap;font-variant-numeric:tabular-nums} .neg{color:var(--accent)} .pos{color:var(--warn)}
+.scroll{overflow-x:auto}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+button,input{font:inherit;color:inherit}
+button{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;width:100%;padding:9px 12px}
+input{display:block;width:100%;box-sizing:border-box;margin:6px 0 14px;padding:8px 10px;
+background:var(--bg);border:1px solid var(--line);border-radius:8px}
+.login{max-width:340px;margin:12vh auto 0}
+"""
+
+
+def render_login(message=""):
+    note = f'<p class="pos">{html.escape(message)}</p>' if message else ""
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Disk Watch: sign in</title>
+<style>{STYLE}</style></head><body><main class="login">
+<h1>Disk Watch</h1><div class="muted">Sign in to see the disk activity reports.</div>
+<form class="card" method="post" action="/login">{note}
+<label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+<button class="primary" type="submit">Sign in</button></form>
+</main></body></html>"""
+
+
 def render_page():
     e = lambda s: html.escape(str(s))
     now = time.time()
@@ -581,20 +630,9 @@ def render_page():
     parts = [f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="30"><title>Disk Watch</title>
-<style>
-:root{{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--muted:#677084;--line:#e3e6ec;--accent:#2f6fde;--warn:#b5651d}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#14171c;--card:#1d2128;--fg:#e4e7ec;--muted:#959cab;--line:#2c313a;--accent:#6ea0ff;--warn:#e0a060}}}}
-body{{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}}
-main{{max-width:1100px;margin:0 auto;padding:20px 16px}}
-h1{{font-size:20px;margin:0 0 4px}} h2{{font-size:16px;margin:28px 0 10px}}
-.muted{{color:var(--muted)}} .card{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}}
-.stats{{display:flex;flex-wrap:wrap;gap:8px 24px}} .stats b{{display:block;font-size:16px}}
-table{{width:100%;border-collapse:collapse;font-size:13px}} th,td{{text-align:left;padding:6px 8px;border-top:1px solid var(--line);vertical-align:top}}
-th{{color:var(--muted);font-weight:500;border-top:none}} code{{font-size:12px;word-break:break-all}}
-.t{{white-space:nowrap;font-variant-numeric:tabular-nums}} .neg{{color:var(--accent)}} .pos{{color:var(--warn)}}
-.scroll{{overflow-x:auto}}
-</style></head><body><main>
-<h1>Disk Watch</h1><div class="muted">What wakes up and reads from the hard drives behind {e(VOLUME)}. Refreshes every 30 s.</div>
+<style>{STYLE}</style></head><body><main>
+<div class="top"><div><h1>Disk Watch</h1><div class="muted">What wakes up and reads from the hard drives behind {e(VOLUME)}. Refreshes every 30 s.</div></div>
+<form method="post" action="/logout"><button type="submit">Sign out</button></form></div>
 <div class="card stats">
 <div><span class="muted">HDDs</span><b>{e(", ".join(status["hdds"]) or "none found")}</b></div>
 <div><span class="muted">HDD I/O quiet for</span><b>{fmt_duration(quiet)}</b></div>
@@ -670,26 +708,142 @@ th{{color:var(--muted);font-weight:500;border-top:none}} code{{font-size:12px;wo
     return "".join(parts)
 
 
+# ------------------------------------------------------------------- auth
+
+auth_lock = threading.Lock()
+sessions = {}                     # token -> expiry time
+login_failures = {}               # client IP -> (failures, locked_until)
+
+
+def password_ok(candidate):
+    return hmac.compare_digest(candidate.encode("utf-8", "replace"), PASSWORD.encode("utf-8"))
+
+
+def new_session():
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with auth_lock:
+        for t in [t for t, exp in sessions.items() if exp < now]:
+            del sessions[t]
+        if len(sessions) >= 100:
+            del sessions[min(sessions, key=sessions.get)]
+        sessions[token] = now + SESSION_HOURS * 3600
+    return token
+
+
+def session_valid(token):
+    if not token:
+        return False
+    with auth_lock:
+        exp = sessions.get(token)
+        if exp is None or exp < time.time():
+            sessions.pop(token, None)
+            return False
+        return True
+
+
+def end_session(token):
+    with auth_lock:
+        sessions.pop(token, None)
+
+
+def locked_out(ip):
+    with auth_lock:
+        failures, until = login_failures.get(ip, (0, 0))
+        return until > time.time()
+
+
+def record_failure(ip):
+    with auth_lock:
+        failures, _ = login_failures.get(ip, (0, 0))
+        failures += 1
+        until = time.time() + LOCKOUT_SECONDS if failures >= MAX_LOGIN_FAILURES else 0
+        login_failures[ip] = (0 if until else failures, until)
+        if len(login_failures) > 1000:
+            login_failures.clear()
+
+
+def clear_failures(ip):
+    with auth_lock:
+        login_failures.pop(ip, None)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
+    def session_token(self):
+        cookie = http.cookies.SimpleCookie()
         try:
-            if self.path.startswith("/api/"):
-                with lock:
-                    data = {"wakes": list(wakes), "bursts": list(bursts)}
-                body = json.dumps(data).encode()
-                ctype = "application/json"
-            else:
-                body = render_page().encode("utf-8", "replace")
-                ctype = "text/html; charset=utf-8"
-            code = 200
-        except Exception as e:
-            body = f"Disk Watch page error: {e}".encode("utf-8", "replace")
-            ctype, code = "text/plain; charset=utf-8", 500
+            cookie.load(self.headers.get("Cookie", ""))
+        except http.cookies.CookieError:
+            return None
+        morsel = cookie.get(SESSION_COOKIE)
+        return morsel.value if morsel else None
+
+    def respond(self, code, body=b"", ctype="text/html; charset=utf-8", headers=()):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
+                         "frame-ancestors 'none'; base-uri 'none'")
+        for name, value in headers:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def redirect(self, location, headers=()):
+        self.respond(303, headers=[("Location", location), *headers])
+
+    def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        try:
+            if path == "/login":
+                if session_valid(self.session_token()):
+                    return self.redirect("/")
+                return self.respond(200, render_login().encode())
+            if not session_valid(self.session_token()):
+                if path.startswith("/api/"):
+                    return self.respond(401, b'{"error": "sign in required"}', "application/json")
+                return self.redirect("/login")
+            if path.startswith("/api/"):
+                with lock:
+                    data = {"wakes": list(wakes), "bursts": list(bursts)}
+                return self.respond(200, json.dumps(data).encode(), "application/json")
+            if path == "/":
+                return self.respond(200, render_page().encode("utf-8", "replace"))
+            return self.respond(404, b"Not found", "text/plain; charset=utf-8")
+        except Exception as e:
+            return self.respond(500, f"Disk Watch page error: {e}".encode("utf-8", "replace"),
+                                "text/plain; charset=utf-8")
+
+    def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/logout":
+            end_session(self.session_token())
+            return self.redirect("/login", [("Set-Cookie", f"{SESSION_COOKIE}=; Max-Age=0; Path=/; "
+                                                           "HttpOnly; SameSite=Strict")])
+        if path != "/login":
+            return self.respond(404, b"Not found", "text/plain; charset=utf-8")
+        ip = self.client_address[0]
+        if locked_out(ip):
+            return self.respond(429, render_login("Too many failed attempts. Try again in 15 minutes.").encode())
+        try:
+            length = min(int(self.headers.get("Content-Length", "0")), 4096)
+        except ValueError:
+            length = 0
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        if password_ok(form.get("password", [""])[0]):
+            clear_failures(ip)
+            token = new_session()
+            return self.redirect("/", [("Set-Cookie", f"{SESSION_COOKIE}={token}; "
+                                                      f"Max-Age={int(SESSION_HOURS * 3600)}; Path=/; "
+                                                      "HttpOnly; SameSite=Strict")])
+        record_failure(ip)
+        time.sleep(1)
+        return self.respond(401, render_login("Wrong password.").encode())
 
     def log_message(self, *args):
         pass
@@ -708,6 +862,13 @@ def load_history(name, target):
 
 
 def main():
+    global PASSWORD
+    if not PASSWORD:
+        PASSWORD = secrets.token_urlsafe(12)
+        print("diskwatch: DISKWATCH_PASSWORD is not set; generated a password for this run: "
+              f"{PASSWORD}", flush=True)
+    elif len(PASSWORD) < 12:
+        print("diskwatch: warning: DISKWATCH_PASSWORD is shorter than 12 characters", flush=True)
     os.makedirs(DATA_DIR, exist_ok=True)
     load_history("wakes.jsonl", wakes)
     load_history("bursts.jsonl", bursts)
