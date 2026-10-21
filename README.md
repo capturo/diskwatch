@@ -29,35 +29,49 @@ Things to be aware of:
 - The web page has **no password**. Anyone on your network can see file and folder names on the HDD volume. Stop it once you've found what you were looking for.
 - With `TRACE_READS=1`, every read on the volume becomes an event. During a large copy or a 4K stream, that can use a noticeable share of one CPU core.
 
-## Setup (UGOS Pro, no SSH needed)
+## Setup
 
-1. **Create the folders.** In UGOS **File Manager**, open the **docker** shared folder on `/volume2`. Create a folder named `diskwatch`, and inside it a folder named `data`.
-2. **Upload the script.** Upload `diskwatch.py` into `docker/diskwatch` (not into `data`). You should end up with:
-   ```
-   docker/
-     diskwatch/
-       diskwatch.py
-       data/
-   ```
-   The folder has to be on the SSD volume (`/volume2`), so the monitor never touches the HDDs.
-3. **Create the project.** In the **Docker** app, go to **Project → Create**.
+The image is built from the `Dockerfile` in this repo, which copies `diskwatch.py` into a `python:3.12-slim` image. Reports are saved to `/volume2/docker/diskwatch/data` on the NAS, which Docker creates on first start. That folder has to be on the SSD volume, so the monitor never touches the HDDs.
+
+If your volumes are laid out differently, change the `/volume2/docker/diskwatch/data` path and `WATCH_VOLUME` in `docker-compose.yml`.
+
+### With Portainer (recommended)
+
+Portainer builds and runs the stack straight from this repository, so nothing needs to be uploaded to the NAS.
+
+1. In Portainer, go to **Stacks → Add stack**.
+2. **Name:** `diskwatch`
+3. **Build method:** **Repository**.
+   - Repository URL: `https://github.com/capturo/diskwatch`
+   - Repository reference: `refs/heads/main`
+   - Compose path: `docker-compose.yml`
+   - If the repository is private, turn on **Authentication** and enter your GitHub username and a personal access token with read access to the repo.
+4. Click **Deploy the stack**. The first deploy downloads `python:3.12-slim` (about 50 MB) and builds the image.
+
+To update after new commits, open the stack, click **Pull and redeploy**, and turn on the option to re-pull the image. If the page still shows the old version, delete the `diskwatch:local` image under **Images** and redeploy.
+
+### With the UGOS Docker app
+
+1. In UGOS **File Manager**, open the **docker** shared folder on `/volume2` and create a folder named `diskwatch`.
+2. Upload `diskwatch.py`, `Dockerfile` and `docker-compose.yml` into it.
+3. In the **Docker** app, go to **Project → Create**.
    - Name: `diskwatch`
    - Path: `docker/diskwatch`
-   - Compose configuration: paste in the contents of `docker-compose.yml`, or upload the file.
-4. **Start it.** Click **Deploy**, or **Create** and then **Start**. The first start downloads the `python:3.12-slim` image (about 50 MB).
-5. **Check that it works.**
-   - In the Docker app, open **Container → diskwatch → Log**. You should see a line like:
-     ```
-     diskwatch: watching /volume1, HDDs ['sda', 'sdb', 'sdc', 'sdd'], web on :8099
-     ```
-   - Open `http://<NAS-IP>:8099` in a browser, using the same IP as the UGOS web interface.
-   - **HDDs** should list your hard drives.
-   - **Watch mode** should say `whole filesystem` or `per-mount ...`.
-   - **File events seen** should go up when you open a folder on `/volume1`.
+   - Compose configuration: use the uploaded `docker-compose.yml`.
+4. Click **Deploy**, or **Create** and then **Start**.
 
-   If the page shows a red error box, the message says what went wrong. "waiting: /volume1 is not mounted yet" right after a reboot is normal and clears by itself.
+### Check that it works
 
-If your volumes are laid out differently, change the `/volume2/docker/diskwatch/...` paths and `WATCH_VOLUME` in `docker-compose.yml`.
+- Open the container's log in Portainer or the Docker app. You should see a line like:
+  ```
+  diskwatch: watching /volume1, HDDs ['sda', 'sdb', 'sdc', 'sdd'], web on :8099
+  ```
+- Open `http://<NAS-IP>:8099` in a browser, using the same IP as the UGOS web interface.
+- **HDDs** should list your hard drives.
+- **Watch mode** should say `whole filesystem` or `per-mount ...`.
+- **File events seen** should go up when you open a folder on `/volume1`.
+
+If the page shows a red error box, the message says what went wrong. "waiting: /volume1 is not mounted yet" right after a reboot is normal and clears by itself.
 
 ## Reading the results
 
@@ -101,4 +115,8 @@ These are set as environment variables in `docker-compose.yml`. Restart the proj
 
 ## Stopping
 
-In the Docker app, go to **Project → diskwatch** and click **Stop**, or delete the project. The data folder keeps the reports until you delete it.
+In Portainer, open **Stacks → diskwatch** and click **Stop this stack**, or delete it. In the UGOS Docker app, go to **Project → diskwatch** and click **Stop**, or delete the project. Either way, `/volume2/docker/diskwatch/data` keeps the reports until you delete it.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
