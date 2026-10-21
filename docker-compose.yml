@@ -3,9 +3,20 @@
 # Set DISKWATCH_PASSWORD and DISKWATCH_BIND_IP as stack environment variables (not in this file).
 services:
   diskwatch:
-    # Built from the Dockerfile on GitHub, so this file can be pasted into Portainer's Web editor.
-    build: https://github.com/capturo/diskwatch.git#main
-    pull_policy: build        # rebuild from the latest main on every deploy
+    # The image is defined inline so this file can be pasted into Portainer's Web editor.
+    # diskwatch.py is downloaded from a pinned commit and must match the checksum.
+    build:
+      context: .
+      dockerfile_inline: |
+        # syntax=docker/dockerfile:1
+        FROM python:3.12-slim
+        ENV PYTHONUNBUFFERED=1
+        ADD --checksum=sha256:ea2ee1a4cb91e92a00b56ea53585b067306f9ada5a2d859cc846400a74b7b842 \
+            https://raw.githubusercontent.com/capturo/diskwatch/01f75c6b2d54ba361df09580e524f37385484c2c/diskwatch.py \
+            /app/diskwatch.py
+        EXPOSE 8099
+        CMD ["python3", "/app/diskwatch.py"]
+    pull_policy: build        # rebuild on every deploy, so a new pin takes effect
     image: diskwatch:local
     container_name: diskwatch
     restart: unless-stopped

@@ -30,7 +30,7 @@ The code does not intentionally read file contents, change NAS settings, or writ
 
 ## Setup
 
-The image is built from the `Dockerfile` in this repo, which copies `diskwatch.py` into a `python:3.12-slim` image. `docker-compose.yml` points the build at this GitHub repository, so Docker fetches the code itself, and the compose file can be used on its own. The NAS needs internet access when you deploy, and every deploy rebuilds from the latest `main`. The Compose file stores reports at `/volume2/docker/diskwatch/data` on the NAS. **Create that directory yourself and verify `/volume2` is the SSD mount before deploying.** Also check that the UGOS Docker app's image/container storage and the Project folder are on `/volume2`; otherwise Docker itself may access the HDD pool. The Compose bind mount is configured to fail if the directory is absent, preventing Docker from silently creating it on the wrong filesystem. If your NAS Compose implementation rejects `create_host_path`, update it rather than removing that safeguard.
+`docker-compose.yml` defines the image inline: a `python:3.12-slim` base, plus `diskwatch.py` downloaded over HTTPS from a pinned commit of this repository. The build checks the file's SHA-256 checksum and fails if it doesn't match, so only that exact reviewed version can run. This doesn't need `git` on the NAS, and the compose file works on its own. The NAS needs internet access when you deploy. The `Dockerfile` in the repo builds the same image from a local checkout, for development. The Compose file stores reports at `/volume2/docker/diskwatch/data` on the NAS. **Create that directory yourself and verify `/volume2` is the SSD mount before deploying.** Also check that the UGOS Docker app's image/container storage and the Project folder are on `/volume2`; otherwise Docker itself may access the HDD pool. The Compose bind mount is configured to fail if the directory is absent, preventing Docker from silently creating it on the wrong filesystem. If your NAS Compose implementation rejects `create_host_path`, update it rather than removing that safeguard.
 
 If your volumes are laid out differently, change the `/volume2/docker/diskwatch/data` path and `WATCH_VOLUME` in `docker-compose.yml`.
 
@@ -50,11 +50,17 @@ Nothing needs to be uploaded to the NAS. You only paste the compose file and add
    - `DISKWATCH_BIND_IP`: the NAS LAN address
 5. Click **Deploy the stack**. The first deploy downloads the Python base image and builds the image.
 
-To update after new commits, open the stack and click **Update the stack**. The build step fetches the latest `main` again.
+To update to a new version, open the stack, paste the latest `docker-compose.yml` (which pins the new commit and checksum) into the editor, and click **Update the stack**.
 
 The **Repository** build method also works, with URL `https://github.com/capturo/diskwatch`, reference `refs/heads/main` and compose path `docker-compose.yml`. Add the same two environment variables.
 
-If a deploy fails with a build or git error, your Docker version may not support building from a Git URL. In that case, change `build:` to `build: .` in `docker-compose.yml` on a branch or fork, and deploy that with the Repository method. Repository mode clones the repo first, so `.` works there.
+If a deploy fails with an error about `dockerfile_inline` or `--checksum`, the NAS's Docker or Compose is too old. Use the Repository method with `build: .` on a branch or fork. Repository mode clones the repo first, so it can use the `Dockerfile` directly.
+
+**Releasing a new version.** When `diskwatch.py` changes, commit and push it first. Then update the pin in `docker-compose.yml`:
+- the commit in the URL: the commit that contains the new `diskwatch.py` (`git rev-parse HEAD`)
+- the checksum: `shasum -a 256 diskwatch.py`
+
+Commit and push that too.
 
 ### With the UGOS Docker app
 
