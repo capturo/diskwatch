@@ -1,0 +1,24 @@
+# Disk Watch: shows what wakes up the HDDs. Web page on http://<nas-ip>:8099
+# Keep this folder on the SSD volume (/volume2) so the monitor never touches the HDDs.
+services:
+  diskwatch:
+    image: python:3.12-slim
+    container_name: diskwatch
+    restart: unless-stopped
+    privileged: true          # needed for fanotify and reading other processes' info
+    pid: host                 # see the real NAS processes, not just the container's
+    ports:
+      - "8099:8099"
+    environment:
+      - WATCH_VOLUME=/volume1 # the HDD volume
+      - QUIET_SECONDS=300     # HDD silence that counts as "asleep" before a wakeup
+      - TRACE_READS=1         # 1 = also log reads/writes on already-open files (noisier)
+      - BURST_MB_S=20         # combined HDD read+write rate that counts as heavy I/O
+      - BURST_MIN_SECONDS=120 # only report heavy I/O that lasts at least this long
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /volume2/docker/diskwatch/diskwatch.py:/app/diskwatch.py:ro
+      - /volume2/docker/diskwatch/data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # only to show container names
+      - /etc/localtime:/etc/localtime:ro
+    command: ["python3", "/app/diskwatch.py"]
